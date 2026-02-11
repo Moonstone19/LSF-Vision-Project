@@ -5,7 +5,9 @@ import threading
 import numpy as np
 from collections import deque
 
-# --- 1. CONFIGURATION DE LA SYNTHÈSE VOCALE ---
+# --- 1. CONFIGURATION DE LA SYNTHÈSE VOCALE (ACTION DU PIPELINE) ---
+# Justification : Utilisation du threading pour une sortie audio non-bloquante.
+# Cela permet de maintenir la fluidité du pipeline vidéo pendant la parole
 def parler_async(texte):
     def task():
         try:
@@ -17,29 +19,37 @@ def parler_async(texte):
             pass
     threading.Thread(target=task, daemon=True).start()
 
-# --- 2. CONFIGURATION DE LA STABILITÉ ---
+# --- 2. CONFIGURATION DE LA STABILITÉ (POST-TRAITEMENT) ---
+# Justification : Filtrage temporel pour réduire le bruit dans les résultats
 compteur_stabilite = 0
 signe_en_cours = ""
 seuil_validation = 10 
-# On garde la trace mais on va la gérer plus proprement
-pts = deque(maxlen=10) # Réduit à 10 pour être moins envahissant
+pts = deque(maxlen=10) 
 
-# --- 3. INITIALISATION DE L'IA ---
+# --- 3. INITIALISATION DE L'IA (EXTRACTION DE CARACTÉRISTIQUES) ---
+# Justification : Utilisation de MediaPipe pour transformer l'image brute en points 3D (caractéristiques)
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.8)
 mp_draw = mp.solutions.drawing_utils
-
 cap = cv2.VideoCapture(0)
 last_vocal_sign = ""
 
+# --- BOUCLE PRINCIPALE : PIPELINE DE COMPUTER VISION --- 
 while cap.isOpened():
     success, img = cap.read()
     if not success: break
 
+    # ÉTAPE A : PRÉTRAITEMENT 
+    # Justification : Le flou Gaussien lisse le bruit numérique pour stabiliser l'IA
     img = cv2.GaussianBlur(img, (3, 3), 0)
+    # Justification : Le flip horizontal assure l'ergonomie (mode miroir)
     img = cv2.flip(img, 1) 
     h, w, c = img.shape
+    # Conversion de l'espace colorimétrique (BGR vers RGB) requise par MediaPipe
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # ÉTAPE B : EXTRACTION DE CARACTÉRISTIQUES 
+    # Les "Landmarks" sont les caractéristiques extraites de l'image brute
     results = hands.process(img_rgb)
 
     display_text = "En attente..."
@@ -47,7 +57,6 @@ while cap.isOpened():
     temp_res = ""
 
     if results.multi_hand_landmarks:
-        # On ne prend la position pour la trace QUE de la première main pour éviter le gribouillis
         first_hand = results.multi_hand_landmarks[0]
         center = (int(first_hand.landmark[8].x * w), int(first_hand.landmark[8].y * h))
         pts.appendleft(center)
@@ -55,7 +64,8 @@ while cap.isOpened():
         for hand_landmarks in results.multi_hand_landmarks:
             landmarks = hand_landmarks.landmark
             
-            # Logique des doigts
+            # ÉTAPE C : CLASSIFICATION (ALGORITHME D'ANALYSE) 
+            # Justification : Algorithme géométrique basé sur la position relative des points
             fingers = []
             for id in [8, 12, 16, 20]:
                 if landmarks[id].y < landmarks[id - 2].y: fingers.append(1)
@@ -64,7 +74,7 @@ while cap.isOpened():
             y_poignet = landmarks[0].y
             inclinaison = abs(landmarks[20].x - landmarks[0].x) > 0.18
             
-            # Reconnaissance des signes
+            # Logique de classification des signes 
             if fingers == [1, 1, 1, 1]:
                 if inclinaison: temp_res, current_color = "AU REVOIR", (255, 0, 255)
                 elif landmarks[8].y < 0.30: temp_res, current_color = "BONJOUR", (0, 255, 255)
@@ -77,17 +87,18 @@ while cap.isOpened():
             elif landmarks[8].y > landmarks[6].y and landmarks[8].y < landmarks[5].y:
                 temp_res, current_color = "C", (42, 42, 165)
 
-            # Dessin du squelette avec la couleur du signe
+            # Visualisation des résultats sur l'image (couleur et texte)
             style_pts = mp_draw.DrawingSpec(color=current_color, thickness=2, circle_radius=3)
             mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS, style_pts)
 
-        # Gestion de la stabilité
+        # GESTION DE LA STABILITÉ (FILTRAGE DE SORTIE)
         if temp_res == signe_en_cours and temp_res != "":
             compteur_stabilite += 1
         else:
             signe_en_cours = temp_res
             compteur_stabilite = 0
 
+        # ÉTAPE D : RÉSULTATS ET INTERPRÉTATION 
         if compteur_stabilite >= seuil_validation:
             display_text = signe_en_cours
             if display_text != last_vocal_sign:
@@ -97,20 +108,17 @@ while cap.isOpened():
         pts.clear()
         compteur_stabilite = 0
 
-    # UI : Barre de stabilité plus fine
+    # UI : INDICATEUR VISUEL 
     bar_v = int((min(compteur_stabilite, seuil_validation) / seuil_validation) * 200)
     cv2.rectangle(img, (20, h-30), (20 + bar_v, h-20), current_color, cv2.FILLED)
-
-    # Affichage du texte
     cv2.putText(img, display_text, (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
 
-    # DESSIN DE LA TRACE (Seulement si une main est là et de façon plus fine)
+    # DESSIN DE LA TRACE (SUIVI DE TRAJECTOIRE)
     for i in range(1, len(pts)):
         if pts[i - 1] is None or pts[i] is None: continue
-        # Ligne plus fine (thickness=2) pour ne pas faire brouillon
         cv2.line(img, pts[i - 1], pts[i], current_color, 2)
 
-    cv2.imshow("PROJET LSF - RITA", img)
+    cv2.imshow("PROJET langage des signes - RITA", img)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
